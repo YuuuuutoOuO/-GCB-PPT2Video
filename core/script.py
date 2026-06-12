@@ -1,12 +1,12 @@
 """
 core/script.py
 ──────────────
-講稿組合：將 parse_slide 結果依 settings 規則組合成 TTS 文字
-支援 SSML <break> 標籤在每個段落後插入停頓
+講稿組合：將 parse_slide 結果依 settings 規則組合成段落列表
+每頁回傳 list[str]，每個元素為一個獨立段落（純文字，無 SSML）
+停頓由 tts.py 在段落間插入靜音音檔實現
 """
 
-import re
-from core.utils import clean_text_for_tts, extract_title_number
+from core.utils import clean_text_for_tts
 
 
 # ══════════════════════════════════════════════════════════════
@@ -33,34 +33,6 @@ def _parse_notes_indices(settings: dict) -> set:
         start, end = str(cfg).split("-")
         return set(range(int(start) - 1, int(end)))
     return set()
-
-
-# ══════════════════════════════════════════════════════════════
-# SSML 組合
-# ══════════════════════════════════════════════════════════════
-
-BREAK_TAG = '<break time="300ms"/>'
-
-
-def _wrap_ssml(text: str) -> str:
-    """將純文字包裝成 SSML 格式，供 Edge-TTS 使用"""
-    return (
-        '<speak version="1.0" '
-        'xmlns="http://www.w3.org/2001/10/synthesis" '
-        'xml:lang="zh-TW">'
-        + text +
-        '</speak>'
-    )
-
-
-def _build_ssml_parts(parts: list, break_ms: int = 300) -> str:
-    """
-    將 parts 串接並在每個部分後加入 <break>，最後包成 SSML。
-    parts 為純文字 list，每個元素代表一個語意段落。
-    """
-    break_tag = f'<break time="{break_ms}ms"/>'
-    joined = break_tag.join(p for p in parts if p.strip())
-    return _wrap_ssml(joined)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -109,77 +81,73 @@ def build_script(
     is_last_page_of_subtitle: bool,
     settings: dict,
     read_notes: bool = False,
-) -> str:
+) -> list[str]:
     """
-    組合單頁完整講稿（SSML 格式）。
+    組合單頁講稿，回傳段落列表（純文字）。
+    每個元素代表一個語意段落，tts.py 會在段落間插入靜音停頓。
 
-    read_notes=True → 只唸備註欄，忽略投影片內容（適用前導頁）
+    read_notes=True → 只唸備註欄，回傳單一元素的列表
+    空頁             → 回傳空列表
     """
-    break_ms = settings.get("pause_between_paragraphs_ms", 300)
-
     # ── 備註模式 ─────────────────────────────────────────────
     if read_notes:
         notes = parsed.get("notes", "").strip()
         if not notes:
-            return " "
+            return []
         clean = clean_text_for_tts(notes)
-        return _wrap_ssml(clean) if clean else " "
+        return [clean] if clean else []
 
     subtitle = parsed["subtitle"]
     cfg = get_subtitle_config(subtitle, settings)
-    continuation_opener = settings.get("continuation_opener", "接續上頁，")
+    continuation_opener = settings.get("continuation_opener", "接續上頁，") or ""
+
+    def _add(text):
+        """只 append 非空 str，過濾掉 None 或空字串"""
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
 
     parts = []
 
     # ── 大標題（只在單元第一頁唸）───────────────────────────
     if is_first_page and parsed["title"]:
-        parts.append(clean_text_for_tts(parsed["title"]) + "。")
+        _add(clean_text_for_tts(parsed["title"]) + "。")
 
     # ── 開場白 ───────────────────────────────────────────────
     if is_continuation:
-        parts.append(continuation_opener)
-    elif cfg.get("opener"):
-        parts.append(cfg["opener"])
+        _add(continuation_opener)
+    else:
+        _add(cfg.get("opener") or "")
 
     # ── 內容段落（每個 paragraph 獨立加入，各自有停頓）──────
     for text, is_code in parsed.get("paragraphs", []):
         if is_code:
             continue   # 跳過程式碼行，不唸
-        clean = clean_text_for_tts(text)
-        if clean:
-            parts.append(clean)
+        _add(clean_text_for_tts(text))
 
     # ── 圖形內文字 ───────────────────────────────────────────
     if cfg.get("read_shapes"):
         for shape_text in parsed.get("shapes_text", []):
-            clean = clean_text_for_tts(shape_text)
-            if clean:
-                parts.append(clean)
+            _add(clean_text_for_tts(shape_text))
 
     # ── 表格 ─────────────────────────────────────────────────
     if cfg.get("read_table") and parsed.get("table_rows"):
-        sentence = build_table_sentence(parsed["table_rows"], settings)
-        if sentence:
-            parts.append(sentence)
+        _add(build_table_sentence(parsed["table_rows"], settings))
 
     # ── 收尾 ─────────────────────────────────────────────────
-    if is_last_page_of_subtitle and cfg.get("closer"):
-        parts.append(cfg["closer"])
+    if is_last_page_of_subtitle:
+        _add(cfg.get("closer") or "")
 
-    if not parts:
-        return " "
-
-    return _build_ssml_parts(parts, break_ms)
+    return parts
 
 
 # ══════════════════════════════════════════════════════════════
 # 全頁講稿批次組合
 # ══════════════════════════════════════════════════════════════
 
-def build_all_scripts(parsed_list: list, settings: dict) -> list:
+def build_all_scripts(parsed_list: list, settings: dict) -> list[list[str]]:
     """
-    遍歷所有投影片，組合每頁講稿（SSML 格式）。
-    回傳 list of str，長度 == 投影片頁數。
+    遍歷所有投影片，組合每頁講稿。
+    回傳 list[list[str]]，外層長度 == 投影片頁數，內層為該頁的段落列表。
     """
     notes_indices = _parse_notes_indices(settings)
 

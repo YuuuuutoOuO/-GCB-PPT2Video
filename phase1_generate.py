@@ -8,6 +8,8 @@ Phase 1：解析 PPT → 組合講稿 → TTS 配音 → 合成單頁 MP4
   python phase1_generate.py --pptx file.pptx --pages 1-3,5
   python phase1_generate.py --pptx file.pptx --range 58,60-65
   python phase1_generate.py --pptx file.pptx --pages 1-3 --range 58-60
+  python phase1_generate.py --pptx file.pptx --workers 8   （調整平行數）
+  python phase1_generate.py --pptx file.pptx --no-gpu      （強制 CPU 編碼）
 """
 
 import os
@@ -19,7 +21,10 @@ import yaml
 from core.parser  import parse_all_slides
 from core.script  import build_all_scripts
 from core.tts     import generate_audio_for_targets
-from core.video   import export_slides_to_images, get_sorted_images, get_clip_path, create_single_clip
+from core.video   import (
+    export_slides_to_images, get_sorted_images,
+    get_clip_path, create_clips_parallel,
+)
 from core.utils   import resolve_target_indices, confirm_dual_mode
 
 
@@ -29,17 +34,18 @@ def load_settings(path: str) -> dict:
 
 
 def write_scripts_txt(scripts, parsed_list, target_indices, output_path):
-    """只輸出本次處理頁的講稿"""
+    """只輸出本次處理頁的講稿（scripts 為 list[list[str]]）"""
     targets = sorted(target_indices) if target_indices else list(range(len(scripts)))
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("本次處理頁講稿預覽\n")
         f.write("=" * 60 + "\n\n")
         for idx in targets:
-            parsed = parsed_list[idx]
+            parsed  = parsed_list[idx]
+            preview = " / ".join(scripts[idx])[:200] if scripts[idx] else "（空白頁）"
             f.write(f"【第 {idx + 1} 頁】\n")
             f.write(f"  標題   ：{parsed['title']}\n")
             f.write(f"  副標題 ：{parsed['subtitle']}\n")
-            f.write(f"  講稿   ：{scripts[idx][:200]}\n\n")
+            f.write(f"  講稿   ：{preview}\n\n")
     print(f"  講稿已輸出至：{output_path}")
 
 
@@ -50,6 +56,8 @@ def main():
     parser.add_argument("--clips",    default="clips",         help="clips 輸出資料夾")
     parser.add_argument("--pages",    default="",              help="指定頁碼，如 1-3,5,10")
     parser.add_argument("--range",    default="",              help="指定標題編號，如 58,60-65")
+    parser.add_argument("--workers",  type=int, default=4,     help="Phase C 平行合成數（預設 4）")
+    parser.add_argument("--no-gpu",   action="store_true",     help="停用 GPU 編碼，改用 CPU libx264")
     args = parser.parse_args()
 
     pptx_path = os.path.abspath(args.pptx)
@@ -57,9 +65,15 @@ def main():
     os.makedirs(clips_dir, exist_ok=True)
 
     print("載入設定檔...")
-    settings = load_settings(args.settings)
-    fps = settings.get("video_fps", 12)
-    dpi = settings.get("export_dpi", 200)
+    settings    = load_settings(args.settings)
+    fps         = settings.get("video_fps", 12)
+    dpi         = settings.get("export_dpi", 200)
+    ffmpeg_path = settings.get("ffmpeg_path", "ffmpeg")
+    use_gpu     = not args.no_gpu
+
+    print(f"  ffmpeg：{ffmpeg_path}")
+    print(f"  編碼  ：{'NVIDIA GPU (h264_nvenc)' if use_gpu else 'CPU (libx264)'}")
+    print(f"  平行數：{args.workers}")
 
     print("\n解析 PPT 結構...")
     parsed_list = parse_all_slides(pptx_path)
@@ -93,35 +107,56 @@ def main():
             generate_audio_for_targets(scripts, target_indices, audio_dir, settings)
         )
 
-        print("\nPhase C：合成單頁 MP4...")
-        done_count = 0
-        fail_count = 0
+        # ── 過濾：跳過截圖缺失、音檔缺失、已存在的頁 ──────────────
+        print("\nPhase C：合成單頁 MP4（平行處理）...")
+        todo = []
+        skipped = 0
 
         for idx in targets:
             if idx >= len(images):
                 print(f"  [警告] 第 {idx + 1} 頁找不到截圖，跳過")
                 continue
 
-            img_path   = os.path.join(image_dir, images[idx])
             audio_path = audio_map.get(idx, "")
-            clip_path  = get_clip_path(parsed_list[idx], idx + 1, clips_dir)
-
             if not audio_path or not os.path.exists(audio_path):
                 print(f"  [警告] 第 {idx + 1} 頁音檔不存在，跳過")
                 continue
 
+            clip_path = get_clip_path(parsed_list[idx], idx + 1, clips_dir)
             if os.path.exists(clip_path):
-                print(f"  第 {idx + 1} 頁已存在，跳過")
+                skipped += 1
                 continue
 
-            print(f"  合成第 {idx + 1} 頁（{done_count + 1}/{len(targets)}）...", end="\r")
-            success = create_single_clip(img_path, audio_path, clip_path, fps)
-            if success:
-                done_count += 1
-            else:
-                fail_count += 1
+            todo.append(idx)
 
-        print(f"\n\n✅ Phase 1 完成！")
+        if skipped:
+            print(f"  已跳過 {skipped} 頁（clip 已存在）")
+
+        audio_missing = len(targets) - len(todo) - skipped
+        if audio_missing > 0:
+            print(f"  ⚠️  {audio_missing} 頁音檔不存在，請確認 Phase B 是否成功")
+
+        if todo:
+            done_count, fail_count = create_clips_parallel(
+                todo=todo,
+                images=images,
+                image_dir=image_dir,
+                audio_map=audio_map,
+                parsed_list=parsed_list,
+                clips_dir=clips_dir,
+                fps=fps,
+                ffmpeg_path=ffmpeg_path,
+                use_gpu=use_gpu,
+                max_workers=args.workers,
+            )
+        else:
+            done_count, fail_count = 0, 0
+            if skipped == len(targets):
+                print("  所有頁面皆已存在，無需重新合成。")
+            else:
+                print("  ⚠️  無可合成的頁面（音檔缺失或截圖缺失），請確認 Phase B 輸出。")
+
+        print(f"\n✅ Phase 1 完成！")
         print(f"   成功合成：{done_count} 頁")
         if fail_count > 0:
             print(f"   ⚠️  失敗頁數：{fail_count} 頁（請補跑失敗頁）")
