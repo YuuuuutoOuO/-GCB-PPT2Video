@@ -1,0 +1,96 @@
+# ============================================================
+# ffmpeg 路徑設定
+# 如果 ffmpeg 沒有加入系統 PATH，請在此指定完整路徑
+# Windows 範例：ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe"
+# 已加入 PATH 則保持空白或刪除此行
+# ============================================================
+ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe"   # ← 請修改為你的實際路徑
+
+# ============================================================
+# 備註唸讀設定
+# 指定哪些頁碼要改唸備註欄內容（適用前導投影片、封面等）
+#
+# 格式選項（三擇一）：
+#   notes_slides: [1, 2, 3]     → 個別指定頁碼（1-based）
+#   notes_slides: "1-5"         → 連續範圍
+#   notes_slides:               → 空白或不填 = 全部不唸備註
+# ============================================================
+notes_slides: [1]   # 範例：只有第1頁為前導頁
+
+# ============================================================
+# 副標題設定
+# opener      : 開場白
+# closer      : 收尾語
+# read_shapes : 是否唸圖形內文字（橢圓圖說文字）
+# read_table  : 是否唸表格
+# ============================================================
+subtitle_config:
+
+  "說明":
+    opener: "以下說明此原則的內容。"
+    closer: "以上為本原則的說明。"
+    read_shapes: false
+    read_table: true
+
+  "設定方法":
+    opener: "以下介紹本原則的設定方法。"
+    closer: "以上為本原則的設定方法說明。"
+    read_shapes: false
+    read_table: false
+
+  "Azure 入口網站操作示意圖":
+    opener: "本頁介紹 Azure 入口網站的操作步驟，"
+    closer: "以上為 Azure 入口網站的操作示範。"
+    read_shapes: true
+    read_table: false
+
+  "Azure CLI設定方法":
+    opener: "本頁介紹 Azure CLI 的設定方法，"
+    closer: "以上為 Azure CLI 的操作步驟。"
+    read_shapes: false
+    read_table: false
+
+  "PowerShell設定方法":
+    opener: "本頁介紹 PowerShell 的設定方法，"
+    closer: "以上為 PowerShell 的操作步驟。"
+    read_shapes: false
+    read_table: false
+
+  "default":
+    opener: "本頁介紹相關內容，"
+    closer: ""
+    read_shapes: false
+    read_table: false
+
+# ============================================================
+# 其他全域設定
+# ============================================================
+
+# 表格唸法的前綴語句
+table_prefix: "此原則支援以下設定方法："
+
+# 表格中「是否支援」欄位的符號對應
+table_supported_symbols:
+  - "☑"
+  - "✓"
+  - "✔"
+  - "V"
+  - "v"
+  - "O"
+  - "o"
+
+# 同副標題出現第二頁（續頁）時，取代 opener 的開場白
+continuation_opener: "接續上頁，"
+
+# 每個段落之間的停頓時間（毫秒）
+pause_between_paragraphs_ms: 300
+
+# TTS 語音設定
+tts_voice: "zh-TW-HsiaoChenNeural"
+tts_batch_size: 20
+
+# 投影片截圖 DPI（預設 96，建議 150~300，數字越高畫質越好但檔案越大）
+export_dpi: 200
+
+# 影片輸出幀率
+video_fps: 12
