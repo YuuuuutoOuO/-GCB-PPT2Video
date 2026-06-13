@@ -13,13 +13,43 @@ from core.utils import clean_text_for_tts
 # settings 輔助
 # ══════════════════════════════════════════════════════════════
 
+def _normalize_subtitle(subtitle: str) -> str:
+    """
+    正規化副標題，去除結尾的頁碼後綴，方便比較與 match。
+    例：
+      "PowerShell設定方法(2/3)" -> "PowerShell設定方法"
+      "說明 (1/2)"              -> "說明"
+      "說明"                    -> "說明"
+    支援全形、半形括號與空格。
+    """
+    import re
+    return re.sub(r"[\s（(]\d+[/／]\d+[)）]?\s*$", "", subtitle).strip()
+
+
 def get_subtitle_config(subtitle: str, settings: dict) -> dict:
-    """取得副標題對應設定，找不到則回傳 default"""
+    """
+    取得副標題對應設定。
+    比對順序：完全匹配 -> 正規化後前綴匹配 -> default
+    """
     configs = settings.get("subtitle_config", {})
-    return configs.get(subtitle, configs.get("default", {
+    default = configs.get("default", {
         "opener": "", "closer": "",
         "read_shapes": False, "read_table": False,
-    }))
+    })
+
+    # 1. 完全匹配
+    if subtitle in configs:
+        return configs[subtitle]
+
+    # 2. 正規化後前綴匹配（排除 default key）
+    normalized = _normalize_subtitle(subtitle)
+    for key, cfg in configs.items():
+        if key == "default":
+            continue
+        if normalized == key or normalized.startswith(key):
+            return cfg
+
+    return default
 
 
 def _parse_notes_indices(settings: dict) -> set:
@@ -151,22 +181,24 @@ def build_all_scripts(parsed_list: list, settings: dict) -> list[list[str]]:
     """
     notes_indices = _parse_notes_indices(settings)
 
-    # 預先計算每個副標題的最後一頁 index
+    # 預先計算每個（標題, 正規化副標題）的最後一頁 index
     subtitle_last_idx = {}
     for idx, p in enumerate(parsed_list):
-        subtitle_last_idx[(p["title"], p["subtitle"])] = idx
+        key = (p["title"], _normalize_subtitle(p["subtitle"]))
+        subtitle_last_idx[key] = idx
 
-    scripts     = []
+    scripts       = []
     prev_title    = None
-    prev_subtitle = None
+    prev_norm_sub = None   # 上一頁正規化後的副標題
 
     for idx, parsed in enumerate(parsed_list):
         title    = parsed["title"]
         subtitle = parsed["subtitle"]
+        norm_sub = _normalize_subtitle(subtitle)
 
         is_first        = (title != prev_title)
-        is_continuation = (not is_first and subtitle == prev_subtitle)
-        is_last         = (subtitle_last_idx[(title, subtitle)] == idx)
+        is_continuation = (not is_first and norm_sub == prev_norm_sub)
+        is_last         = (subtitle_last_idx[(title, norm_sub)] == idx)
         use_notes       = (idx in notes_indices)
 
         script = build_script(
@@ -180,6 +212,6 @@ def build_all_scripts(parsed_list: list, settings: dict) -> list[list[str]]:
         scripts.append(script)
 
         prev_title    = title
-        prev_subtitle = subtitle
+        prev_norm_sub = norm_sub
 
     return scripts
