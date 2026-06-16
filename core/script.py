@@ -6,6 +6,7 @@ core/script.py
 停頓由 tts.py 在段落間插入靜音音檔實現
 """
 
+import re
 from core.utils import clean_text_for_tts
 
 
@@ -22,7 +23,6 @@ def _normalize_subtitle(subtitle: str) -> str:
       "說明"                    -> "說明"
     支援全形、半形括號與空格。
     """
-    import re
     return re.sub(r"[\s（(]\d+[/／]\d+[)）]?\s*$", "", subtitle).strip()
 
 
@@ -101,6 +101,68 @@ def build_table_sentence(table_rows: list, settings: dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
+# 段落過濾輔助
+# ══════════════════════════════════════════════════════════════
+
+def _is_valid_paragraph(text: str) -> bool:
+    """
+    必須含有至少一個中文字、英文字母或數字才算有效段落。
+    過濾純符號行（如單獨的 } 、{ 等）。
+    """
+    text = text.strip()
+    if not text or len(text) < 2:
+        return False
+    if not re.search(r'[\u4e00-\u9fff\w]', text):
+        return False
+    return True
+
+
+def _has_chinese(text: str) -> bool:
+    """判斷文字是否含有中文字"""
+    return bool(re.search(r'[\u4e00-\u9fff]', text))
+
+
+def _process_paragraphs(paragraphs: list) -> list[str]:
+    """
+    處理段落列表，實作程式碼區塊智慧跳過邏輯：
+
+    - is_code=True  → 開始跳過，並繼續往後合併
+    - 後續段落若無中文 → 視為程式碼區塊的一部分，繼續跳過
+    - 後續段落含有中文 → 程式碼區塊結束，恢復正常唸出
+    - is_code=False → 正常唸出
+
+    範例（PowerShell 跨行指令）：
+      "# az network watcher list --query []."  is_code=True  → 跳過
+      "{Location:location,State:provisioningState}" -o table  is_code=False, 無中文 → 跳過
+      "確保每個 Network Watcher 的 provisioningState..."      is_code=False, 有中文 → 唸出 ✅
+    """
+    result = []
+    i = 0
+    while i < len(paragraphs):
+        text, is_code = paragraphs[i]
+
+        if is_code:
+            # 進入程式碼區塊，往後掃描直到遇到含中文的段落
+            i += 1
+            while i < len(paragraphs):
+                next_text, next_is_code = paragraphs[i]
+                # 含中文 → 程式碼區塊結束，讓這行正常處理
+                if _has_chinese(next_text):
+                    break
+                # 不含中文（含下一行 is_code 或純英數符號）→ 繼續跳過
+                i += 1
+            continue
+
+        # 正常段落
+        clean = clean_text_for_tts(text)
+        if _is_valid_paragraph(clean):
+            result.append(clean)
+        i += 1
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
 # 單頁講稿組合
 # ══════════════════════════════════════════════════════════════
 
@@ -131,41 +193,40 @@ def build_script(
     cfg = get_subtitle_config(subtitle, settings)
     continuation_opener = settings.get("continuation_opener", "接續上頁，") or ""
 
-    def _add(text):
-        """只 append 非空 str，過濾掉 None 或空字串"""
-        if isinstance(text, str) and text.strip():
+    def _add(parts: list, text: str):
+        """統一過濾 None、空字串、無意義符號"""
+        if text and _is_valid_paragraph(text):
             parts.append(text.strip())
 
     parts = []
 
     # ── 大標題（只在單元第一頁唸）───────────────────────────
     if is_first_page and parsed["title"]:
-        _add(clean_text_for_tts(parsed["title"]) + "。")
+        _add(parts, clean_text_for_tts(parsed["title"]) + "。")
 
     # ── 開場白 ───────────────────────────────────────────────
     if is_continuation:
-        _add(continuation_opener)
+        _add(parts, continuation_opener)
     else:
-        _add(cfg.get("opener") or "")
+        _add(parts, cfg.get("opener") or "")
 
-    # ── 內容段落（每個 paragraph 獨立加入，各自有停頓）──────
-    for text, is_code in parsed.get("paragraphs", []):
-        if is_code:
-            continue   # 跳過程式碼行，不唸
-        _add(clean_text_for_tts(text))
+    # ── 內容段落（程式碼區塊智慧跳過）───────────────────────
+    processed = _process_paragraphs(parsed.get("paragraphs", []))
+    for text in processed:
+        _add(parts, text)
 
     # ── 圖形內文字 ───────────────────────────────────────────
     if cfg.get("read_shapes"):
         for shape_text in parsed.get("shapes_text", []):
-            _add(clean_text_for_tts(shape_text))
+            _add(parts, clean_text_for_tts(shape_text))
 
     # ── 表格 ─────────────────────────────────────────────────
     if cfg.get("read_table") and parsed.get("table_rows"):
-        _add(build_table_sentence(parsed["table_rows"], settings))
+        _add(parts, build_table_sentence(parsed["table_rows"], settings))
 
     # ── 收尾 ─────────────────────────────────────────────────
     if is_last_page_of_subtitle:
-        _add(cfg.get("closer") or "")
+        _add(parts, cfg.get("closer") or "")
 
     return parts
 

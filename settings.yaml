@@ -46,13 +46,13 @@ subtitle_config:
 
   "Azure CLI設定方法":
     opener: "本頁介紹 Azure CLI 的設定方法，"
-    closer: "執行結果如下圖所示。"
+    closer: "執行結果如圖所示。"
     read_shapes: false
     read_table: false
 
   "PowerShell設定方法":
     opener: "本頁介紹 PowerShell 的設定方法，"
-    closer: "執行結果如下圖所示。"
+    closer: "執行結果如圖所示。"
     read_shapes: false
     read_table: false
 

@@ -7,6 +7,7 @@ core/video.py
   - 移除 moviepy 依賴，改用直接呼叫 ffmpeg subprocess
   - 支援 NVIDIA GPU 編碼（h264_nvenc），CPU fallback（libx264）
   - Phase C 改為 ThreadPoolExecutor 平行合成
+  - GPU/CPU 使用不同 level：nvenc 最低 3.1，libx264 用 3.0
 """
 
 import os
@@ -21,11 +22,17 @@ from core.utils import extract_title_number, set_pptx_export_dpi
 # 投影片截圖（COM 介面，Windows only）
 # ══════════════════════════════════════════════════════════════
 
-def export_slides_to_images(pptx_path: str, image_dir: str, dpi: int = 200):
+def export_slides_to_images(
+    pptx_path: str,
+    image_dir: str,
+    target_pages: list[int],
+    dpi: int = 200,
+) -> dict[int, str]:
     """
-    透過 PowerPoint COM 將每頁匯出為 JPG。
-    匯出前先透過 Registry 設定 DPI 以提升畫質。
+    透過 PowerPoint COM 只截指定頁的截圖（1-based 頁碼）。
+    回傳 {0-based-idx: image_path} 的 dict。
     """
+    from tqdm import tqdm
     set_pptx_export_dpi(dpi)
 
     import win32com.client
@@ -35,15 +42,30 @@ def export_slides_to_images(pptx_path: str, image_dir: str, dpi: int = 200):
     powerpoint = win32com.client.Dispatch("Powerpoint.Application")
     powerpoint.Visible = 1
     deck = powerpoint.Presentations.Open(pptx_abs)
-    deck.SaveAs(img_abs, 17)   # 17 = ppSaveAsJPG
+
+    image_map = {}
+
+    pbar = tqdm(
+        total=len(target_pages),
+        desc="  Phase A 截圖",
+        unit="頁",
+        ncols=70,
+        bar_format="{desc}：{n_fmt}/{total_fmt} {bar} {percentage:3.0f}% [{elapsed}<{remaining}]",
+    )
+
+    for page_1based in target_pages:
+        img_path = os.path.join(img_abs, f"slide_{page_1based:04d}.jpg")
+        if not os.path.exists(img_path):
+            slide = deck.Slides(page_1based)
+            slide.Export(img_path, "JPG")
+        image_map[page_1based - 1] = img_path
+        pbar.update(1)
+
+    pbar.close()
     deck.Close()
     powerpoint.Quit()
 
-
-def get_sorted_images(image_dir: str) -> list:
-    """語系無關的純數字排序，相容中英文檔名"""
-    files = [f for f in os.listdir(image_dir) if f.lower().endswith(".jpg")]
-    return sorted(files, key=lambda x: int("".join(filter(str.isdigit, x)) or 0))
+    return image_map
 
 
 # ══════════════════════════════════════════════════════════════
@@ -66,28 +88,23 @@ def get_clip_path(parsed: dict, page_1based: int, clips_dir: str) -> str:
 # 單頁 MP4 合成
 # ══════════════════════════════════════════════════════════════
 
-def create_single_clip(
+def _build_ffmpeg_cmd(
     img_path: str,
     audio_path: str,
     out_path: str,
     fps: int,
-    ffmpeg_path: str = "ffmpeg",
-    use_gpu: bool = True,
-) -> bool:
+    ffmpeg_path: str,
+    use_gpu: bool,
+) -> list[str]:
     """
-    直接呼叫 ffmpeg 合成單頁 MP4。
-    use_gpu=True  → 使用 NVIDIA h264_nvenc（快）
-    use_gpu=False → fallback 到 CPU libx264（慢但保證相容）
-
-    回傳 True 代表成功，False 代表失敗。
+    組合 ffmpeg 指令列表。
+    GPU/CPU 使用不同的 level：
+      GPU (nvenc) : baseline + level 5.0（nvenc 不支援 3.0）
+      CPU (x264)  : baseline + level 3.0（相容性最廣）
     """
-    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
-        print(f"\n  [錯誤] 音檔異常，跳過：{os.path.basename(audio_path)}")
-        return False
-
-    codec   = "h264_nvenc" if use_gpu else "libx264"
-    # nvenc 用 preset p4；libx264 用 veryfast
-    preset  = "p4"         if use_gpu else "veryfast"
+    codec  = "h264_nvenc" if use_gpu else "libx264"
+    preset = "p4"         if use_gpu else "veryfast"
+    level  = "5.0"        if use_gpu else "3.0"
 
     cmd = [
         ffmpeg_path, "-y",
@@ -98,7 +115,7 @@ def create_single_clip(
         "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-pix_fmt", "yuv420p",
         "-profile:v", "baseline",
-        "-level", "3.0",
+        "-level:v", level,
         "-c:a", "aac",
         "-shortest",
         "-fps_mode", "vfr",
@@ -110,6 +127,28 @@ def create_single_clip(
         cmd.insert(cmd.index("-c:a"), "-tune")
         cmd.insert(cmd.index("-tune") + 1, "hq")
 
+    return cmd
+
+
+def create_single_clip(
+    img_path: str,
+    audio_path: str,
+    out_path: str,
+    fps: int,
+    ffmpeg_path: str = "ffmpeg",
+    use_gpu: bool = True,
+) -> bool:
+    """
+    直接呼叫 ffmpeg 合成單頁 MP4。
+    GPU 失敗時一律自動 fallback 到 CPU。
+    回傳 True 代表成功，False 代表失敗。
+    """
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) < 1024:
+        print(f"\n  [錯誤] 音檔異常，跳過：{os.path.basename(audio_path)}")
+        return False
+
+    cmd = _build_ffmpeg_cmd(img_path, audio_path, out_path, fps, ffmpeg_path, use_gpu)
+
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         return True
@@ -117,16 +156,35 @@ def create_single_clip(
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode("utf-8", errors="ignore")
 
-        # GPU 編碼失敗時自動 fallback 到 CPU
-        if use_gpu and "nvenc" in err_msg.lower():
+        # 過濾出真正的錯誤行
+        err_lines = [
+            line for line in err_msg.splitlines()
+            if any(kw in line.lower() for kw in [
+                "error", "invalid", "failed", "cannot", "no such",
+                "unknown", "not found", "unsupported", "denied",
+                "nvenc", "cuda", "gpu",
+            ])
+        ]
+        err_summary = "\n    ".join(err_lines[:5]) if err_lines else err_msg[-300:]
+
+        if use_gpu:
             print(f"\n  [警告] GPU 編碼失敗，自動改用 CPU 重試：{os.path.basename(out_path)}")
+            print(f"    原因：{err_summary}")
             if os.path.exists(out_path):
                 os.remove(out_path)
-            return create_single_clip(img_path, audio_path, out_path, fps, ffmpeg_path, use_gpu=False)
+            return create_single_clip(
+                img_path, audio_path, out_path,
+                fps, ffmpeg_path, use_gpu=False,
+            )
 
-        print(f"\n  [錯誤] 合成失敗：{err_msg[:300]}")
+        print(f"\n  [錯誤] CPU 合成也失敗：{os.path.basename(out_path)}")
+        print(f"    原因：{err_summary}")
         if os.path.exists(out_path):
             os.remove(out_path)
+        return False
+
+    except FileNotFoundError:
+        print(f"\n  [錯誤] 找不到 ffmpeg：{ffmpeg_path}")
         return False
 
 
@@ -136,8 +194,7 @@ def create_single_clip(
 
 def create_clips_parallel(
     todo: list,
-    images: list,
-    image_dir: str,
+    image_map: dict[int, str],
     audio_map: dict,
     parsed_list: list,
     clips_dir: str,
@@ -148,18 +205,31 @@ def create_clips_parallel(
 ) -> tuple[int, int]:
     """
     平行合成多頁 MP4。
-    todo      : 待處理的 0-based index 列表（已排除已存在的）
+    todo      : 待處理的 0-based index 列表
+    image_map : {0-based-idx: image_path}
     回傳 (done_count, fail_count)
     """
+    from tqdm import tqdm
+
     done_count = 0
     fail_count = 0
-    total = len(todo)
 
     def _task(idx):
-        img_path   = os.path.join(image_dir, images[idx])
+        img_path   = image_map.get(idx, "")
         audio_path = audio_map.get(idx, "")
         clip_path  = get_clip_path(parsed_list[idx], idx + 1, clips_dir)
-        return create_single_clip(img_path, audio_path, clip_path, fps, ffmpeg_path, use_gpu)
+        return create_single_clip(
+            img_path, audio_path, clip_path,
+            fps, ffmpeg_path, use_gpu,
+        )
+
+    pbar = tqdm(
+        total=len(todo),
+        desc="  Phase C 合成",
+        unit="頁",
+        ncols=70,
+        bar_format="{desc}：{n_fmt}/{total_fmt} {bar} {percentage:3.0f}% [{elapsed}<{remaining}]",
+    )
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_task, idx): idx for idx in todo}
@@ -168,7 +238,7 @@ def create_clips_parallel(
             try:
                 success = future.result()
             except Exception as e:
-                print(f"\n  [錯誤] 第 {idx + 1} 頁 exception：{e}")
+                pbar.write(f"  [錯誤] 第 {idx + 1} 頁 exception：{e}")
                 success = False
 
             if success:
@@ -176,10 +246,9 @@ def create_clips_parallel(
             else:
                 fail_count += 1
 
-            finished = done_count + fail_count
-            print(f"  進度：{finished}/{total}　成功：{done_count}　失敗：{fail_count}", end="\r")
+            pbar.update(1)
 
-    print()  # 換行
+    pbar.close()
     return done_count, fail_count
 
 
@@ -214,7 +283,6 @@ def compose_video(
     except FileNotFoundError:
         print(f"\n[錯誤] 找不到 ffmpeg：{ffmpeg_path}")
         print("請確認 settings.yaml 中的 ffmpeg_path 路徑是否正確。")
-        print('例如：ffmpeg_path: "C:\\\\ffmpeg\\\\bin\\\\ffmpeg.exe"')
         sys.exit(1)
 
     os.remove(concat_list_path)

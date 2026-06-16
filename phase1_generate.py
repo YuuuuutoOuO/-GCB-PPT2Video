@@ -22,7 +22,7 @@ from core.parser  import parse_all_slides
 from core.script  import build_all_scripts
 from core.tts     import generate_audio_for_targets
 from core.video   import (
-    export_slides_to_images, get_sorted_images,
+    export_slides_to_images,
     get_clip_path, create_clips_parallel,
 )
 from core.utils   import resolve_target_indices, confirm_dual_mode
@@ -98,13 +98,14 @@ def main():
         os.makedirs(image_dir, exist_ok=True)
         os.makedirs(audio_dir, exist_ok=True)
 
-        print("\nPhase A：匯出投影片截圖（暫存）...")
-        export_slides_to_images(pptx_path, image_dir, dpi=dpi)
-        images = get_sorted_images(image_dir)
+        print("\nPhase A：匯出投影片截圖（只截目標頁）...")
+        target_pages = [idx + 1 for idx in targets]  # 轉為 1-based 頁碼
+        image_map = export_slides_to_images(pptx_path, image_dir, target_pages, dpi=dpi)
+        print(f"  截圖完成：共 {len(image_map)} 頁")
 
         print("\nPhase B：生成 AI 配音（暫存）...")
         audio_map = asyncio.run(
-            generate_audio_for_targets(scripts, target_indices, audio_dir, settings)
+            generate_audio_for_targets(scripts, target_indices, audio_dir, settings, clips_dir)
         )
 
         # ── 過濾：跳過截圖缺失、音檔缺失、已存在的頁 ──────────────
@@ -113,7 +114,7 @@ def main():
         skipped = 0
 
         for idx in targets:
-            if idx >= len(images):
+            if idx not in image_map:
                 print(f"  [警告] 第 {idx + 1} 頁找不到截圖，跳過")
                 continue
 
@@ -137,10 +138,10 @@ def main():
             print(f"  ⚠️  {audio_missing} 頁音檔不存在，請確認 Phase B 是否成功")
 
         if todo:
+            print(f"  待合成：{len(todo)} 頁")
             done_count, fail_count = create_clips_parallel(
                 todo=todo,
-                images=images,
-                image_dir=image_dir,
+                image_map=image_map,
                 audio_map=audio_map,
                 parsed_list=parsed_list,
                 clips_dir=clips_dir,
