@@ -1,12 +1,167 @@
 """
 core/utils.py
 ─────────────
-共用工具：文字清理、範圍參數解析、Registry DPI 設定
+共用工具：文字清理、範圍參數解析、Registry DPI 設定、PPT 檔名路徑隔離與專屬設定管理
 """
 
 import os
 import re
 import sys
+import yaml
+
+
+# ══════════════════════════════════════════════════════════════
+# PPT 檔名與路徑物理隔離工具
+# ══════════════════════════════════════════════════════════════
+
+def get_pptx_stem(pptx_path: str) -> str:
+    """提取 PPTX 檔案主檔名（不含副檔名與路徑）"""
+    if not pptx_path:
+        return ""
+    base = os.path.basename(pptx_path)
+    stem, _ = os.path.splitext(base)
+    return stem
+
+
+def get_default_clips_dir(pptx_path: str, base_dir: str = "clips") -> str:
+    """
+    根據 PPT 檔名取得獨立 clips 資料夾路徑。
+    例："教學簡報測試.pptx" -> "clips/教學簡報測試"
+    """
+    stem = get_pptx_stem(pptx_path)
+    if not stem:
+        return os.path.abspath(base_dir)
+    if os.path.basename(os.path.normpath(base_dir)) == stem:
+        return os.path.abspath(base_dir)
+    return os.path.abspath(os.path.join(base_dir, stem))
+
+
+def get_default_deliverables_dir(pptx_path: str, base_dir: str = "deliverables") -> str:
+    """
+    根據 PPT 檔名取得獨立 deliverables 資料夾路徑。
+    例："教學簡報測試.pptx" -> "deliverables/教學簡報測試"
+    """
+    stem = get_pptx_stem(pptx_path)
+    if not stem:
+        return os.path.abspath(base_dir)
+    if os.path.basename(os.path.normpath(base_dir)) == stem:
+        return os.path.abspath(base_dir)
+    return os.path.abspath(os.path.join(base_dir, stem))
+
+
+# ══════════════════════════════════════════════════════════════
+# 設定檔載入與 Per-PPT 專屬參數管理
+# ══════════════════════════════════════════════════════════════
+
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    """遞迴合併 dictionary，override 會覆蓋 base"""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge_dict(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def load_settings(settings_path: str = "settings.yaml", pptx_path: str = "") -> dict:
+    """
+    載入設定檔並支援特定 PPT 覆蓋設定。
+    優先級順序：
+      1. 全域 settings.yaml
+      2. settings.yaml 內的 presentations[PPT檔名]
+      3. 獨立的 settings_<PPT檔名>.yaml（若存在）
+    """
+    settings = {}
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                settings = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[警告] 讀取設定檔 {settings_path} 失敗：{e}")
+            settings = {}
+
+    if not pptx_path:
+        return settings
+
+    stem = get_pptx_stem(pptx_path)
+    filename = os.path.basename(pptx_path)
+
+    # 1. 檢查 settings.yaml 內的 presentations 區段
+    presentations = settings.get("presentations", {})
+    if isinstance(presentations, dict):
+        matched_cfg = None
+        if stem in presentations:
+            matched_cfg = presentations[stem]
+        elif filename in presentations:
+            matched_cfg = presentations[filename]
+        else:
+            for p_key, p_val in presentations.items():
+                if p_key.lower() in (stem.lower(), filename.lower()):
+                    matched_cfg = p_val
+                    break
+
+        if matched_cfg and isinstance(matched_cfg, dict):
+            settings = _deep_merge_dict(settings, matched_cfg)
+
+    # 2. 檢查是否有獨立設定檔 settings_<stem>.yaml
+    dir_name = os.path.dirname(settings_path) or "."
+    standalone_candidates = [
+        os.path.join(dir_name, f"settings_{stem}.yaml"),
+        os.path.join(dir_name, f"settings_{stem}.yml"),
+        os.path.join(os.path.dirname(pptx_path), f"settings_{stem}.yaml"),
+    ]
+    for cand in standalone_candidates:
+        if os.path.exists(cand):
+            try:
+                with open(cand, "r", encoding="utf-8") as f:
+                    cand_cfg = yaml.safe_load(f) or {}
+                if isinstance(cand_cfg, dict):
+                    settings = _deep_merge_dict(settings, cand_cfg)
+                break
+            except Exception as e:
+                print(f"[警告] 讀取獨立設定檔 {cand} 失敗：{e}")
+
+    return settings
+
+
+def save_pptx_settings(pptx_path: str, ppt_settings: dict, settings_path: str = "settings.yaml") -> bool:
+    """
+    將指定 PPT 的專屬設定安全寫入 settings.yaml 的 presentations 區段。
+    """
+    stem = get_pptx_stem(pptx_path)
+    if not stem:
+        return False
+
+    all_settings = {}
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                all_settings = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[錯誤] 讀取 {settings_path} 失敗：{e}")
+            return False
+
+    if "presentations" not in all_settings or not isinstance(all_settings["presentations"], dict):
+        all_settings["presentations"] = {}
+
+    current_ppt_cfg = all_settings["presentations"].get(stem, {})
+    if not isinstance(current_ppt_cfg, dict):
+        current_ppt_cfg = {}
+
+    for k, v in ppt_settings.items():
+        current_ppt_cfg[k] = v
+
+    all_settings["presentations"][stem] = current_ppt_cfg
+
+    try:
+        with open(settings_path, "w", encoding="utf-8") as f:
+            yaml.dump(all_settings, f, allow_unicode=True, sort_keys=False)
+        return True
+    except Exception as e:
+        print(f"[錯誤] 寫入 {settings_path} 失敗：{e}")
+        return False
+
 
 
 # ══════════════════════════════════════════════════════════════

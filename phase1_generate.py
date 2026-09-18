@@ -15,8 +15,14 @@ Phase 1：解析 PPT → 組合講稿 → TTS 配音 → 合成單頁 MP4
 import os
 import asyncio
 import tempfile
+import sys
 import argparse
 import yaml
+
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from core.parser  import parse_all_slides
 from core.script  import build_all_scripts
@@ -25,55 +31,63 @@ from core.video   import (
     export_slides_to_images,
     get_clip_path, create_clips_parallel,
 )
-from core.utils   import resolve_target_indices, confirm_dual_mode
-
-
-def load_settings(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+from core.utils   import (
+    resolve_target_indices, confirm_dual_mode,
+    load_settings, get_default_clips_dir, get_pptx_stem,
+)
 
 
 def write_scripts_txt(scripts, parsed_list, target_indices, output_path):
-    """只輸出本次處理頁的講稿（scripts 為 list[list[str]]）"""
+    """輸出本次處理頁的完整講稿（scripts 為 list[list[str]]）"""
     targets = sorted(target_indices) if target_indices else list(range(len(scripts)))
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write("本次處理頁講稿預覽\n")
+        f.write("本次處理頁講稿內容\n")
         f.write("=" * 60 + "\n\n")
         for idx in targets:
             parsed  = parsed_list[idx]
-            preview = " / ".join(scripts[idx])[:200] if scripts[idx] else "（空白頁）"
+            script_text = "\n".join(f"    {p}" for p in scripts[idx]) if scripts[idx] else "    （空白頁）"
             f.write(f"【第 {idx + 1} 頁】\n")
             f.write(f"  標題   ：{parsed['title']}\n")
             f.write(f"  副標題 ：{parsed['subtitle']}\n")
-            f.write(f"  講稿   ：{preview}\n\n")
+            f.write(f"  講稿   ：\n{script_text}\n\n")
     print(f"  講稿已輸出至：{output_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 1：PPT → 單頁 MP4 clips")
-    parser.add_argument("--pptx",     required=True,           help="PPT 檔案路徑")
-    parser.add_argument("--settings", default="settings.yaml", help="設定檔路徑")
-    parser.add_argument("--clips",    default="clips",         help="clips 輸出資料夾")
-    parser.add_argument("--pages",    default="",              help="指定頁碼，如 1-3,5,10")
-    parser.add_argument("--range",    default="",              help="指定標題編號，如 58,60-65")
-    parser.add_argument("--workers",  type=int, default=4,     help="Phase C 平行合成數（預設 4）")
-    parser.add_argument("--no-gpu",   action="store_true",     help="停用 GPU 編碼，改用 CPU libx264")
+    parser.add_argument("--pptx",         required=True,           help="PPT 檔案路徑")
+    parser.add_argument("--settings",     default="settings.yaml", help="設定檔路徑")
+    parser.add_argument("--clips",        default="clips",         help="clips 輸出資料夾（預設依 PPT 檔名分流至 clips/<PPT檔名>）")
+    parser.add_argument("--notes-slides", default="",              help="指定唸備註欄之頁碼（例如 1,2,680,681 或 1-5，若提供將覆蓋設定檔）")
+    parser.add_argument("--pages",        default="",              help="指定頁碼，如 1-3,5,10")
+    parser.add_argument("--range",        default="",              help="指定標題編號，如 58,60-65")
+    parser.add_argument("--workers",      type=int, default=4,     help="Phase C 平行合成數（預設 4）")
+    parser.add_argument("--no-gpu",       action="store_true",     help="停用 GPU 編碼，改用 CPU libx264")
     args = parser.parse_args()
 
     pptx_path = os.path.abspath(args.pptx)
-    clips_dir = os.path.abspath(args.clips)
+    pptx_stem = get_pptx_stem(pptx_path)
+    clips_dir = get_default_clips_dir(pptx_path, args.clips)
     os.makedirs(clips_dir, exist_ok=True)
 
-    print("載入設定檔...")
-    settings    = load_settings(args.settings)
+    print("載入設定檔與 PPT 專屬參數...")
+    settings = load_settings(args.settings, pptx_path)
+    if args.notes_slides.strip():
+        settings["notes_slides"] = args.notes_slides.strip()
+
     fps         = settings.get("video_fps", 12)
     dpi         = settings.get("export_dpi", 200)
     ffmpeg_path = settings.get("ffmpeg_path", "ffmpeg")
+    notes_cfg   = settings.get("notes_slides", [])
     use_gpu     = not args.no_gpu
 
-    print(f"  ffmpeg：{ffmpeg_path}")
-    print(f"  編碼  ：{'NVIDIA GPU (h264_nvenc)' if use_gpu else 'CPU (libx264)'}")
-    print(f"  平行數：{args.workers}")
+    print(f"  PPT 檔案：{pptx_path} ({pptx_stem})")
+    print(f"  clips 目錄：{clips_dir}")
+    print(f"  備註頁碼 (notes_slides)：{notes_cfg}")
+    print(f"  ffmpeg  ：{ffmpeg_path}")
+    print(f"  編碼    ：{'NVIDIA GPU (h264_nvenc)' if use_gpu else 'CPU (libx264)'}")
+    print(f"  平行數  ：{args.workers}")
+
 
     print("\n解析 PPT 結構...")
     parsed_list = parse_all_slides(pptx_path)

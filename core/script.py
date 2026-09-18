@@ -58,11 +58,21 @@ def _parse_notes_indices(settings: dict) -> set:
     if not cfg:
         return set()
     if isinstance(cfg, list):
-        return {int(n) - 1 for n in cfg}
-    if isinstance(cfg, str) and "-" in str(cfg):
-        start, end = str(cfg).split("-")
-        return set(range(int(start) - 1, int(end)))
+        indices = set()
+        for item in cfg:
+            if isinstance(item, int):
+                indices.add(item - 1)
+            elif isinstance(item, str) and item.strip():
+                from core.utils import parse_range_str
+                indices.update({p - 1 for p in parse_range_str(item)})
+        return indices
+    if isinstance(cfg, int):
+        return {cfg - 1}
+    if isinstance(cfg, str):
+        from core.utils import parse_range_str
+        return {p - 1 for p in parse_range_str(cfg)}
     return set()
+
 
 
 # ══════════════════════════════════════════════════════════════

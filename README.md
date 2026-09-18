@@ -1,7 +1,22 @@
-# PPT 自動配音轉影片工具
+# PPT 自動配音轉影片與資通院教材交付工具
 
-將 PowerPoint 簡報自動轉換為 MP4 影片。
-每頁投影片依照設定規則組合講稿，透過 Edge-TTS 生成 AI 語音，最後合成為完整影片。
+將 PowerPoint 簡報自動轉換為 MP4 影片，並一鍵產出資通院等機構驗收所需的「影片原檔」、「字幕檔 (SRT/VTT)」、「完整講稿內容 (TXT/MD)」以及「分段大綱時間點清單 (TXT/MD/CSV)」。
+
+---
+
+## 交付物產出清單（完全對齊資通院「繳交說明.docx」標準）
+
+執行 Phase 2 或一鍵交付工具後，將自動於 `deliverables/` 資料夾產出以下完整交付檔案包：
+
+| 資通院規定繳交項目 | 檔案名稱 | 格式規範與說明 |
+|---|---|---|
+| **★ 1. 影片檔** | `Azure教學影片.mp4` | 完整 800+ 頁高畫質無損串接 MP4 影片原檔 |
+| **★ 2. 字幕檔** | `Azure教學影片.srt` | **逐句短句字幕**（對齊「字幕範例.srt」，時間碼精確對應） |
+| **★ 3. 章節檔** | `Azure教學影片.txt` | **FFMETADATA1 格式章節檔**（對齊「大綱_MP4章節範例.txt」，供嵌入 MP4） |
+| **★ 4. 教學簡報** | `Azure教學影片.pptx` | 完整更新後的教學簡報檔 |
+| **附加審查輔助** | `Azure教學影片_分段大綱審查表.csv` | Excel 格式時間軸審查表（支援 UTF-8 BOM，評委審查必備） |
+| | `Azure教學影片_完整講稿內容.txt` | 全頁無截斷純文字講稿 |
+| | `Azure教學影片_分段大綱易讀清單.txt` | 幾分幾秒易讀章節大綱清單 |
 
 ---
 
@@ -10,13 +25,7 @@
 - Windows 作業系統（截圖功能需要 PowerPoint COM 介面）
 - Python 3.9 以上
 - Microsoft PowerPoint（已安裝）
-- ffmpeg（需在 settings.yaml 中設定路徑，或加入系統 PATH）
-
-### 安裝 ffmpeg
-
-1. 至 [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html) 下載 Windows 版本
-2. 解壓縮後記下 `ffmpeg.exe` 的完整路徑（例如 `C:\ffmpeg\bin\ffmpeg.exe`）
-3. 填入 `settings.yaml` 的 `ffmpeg_path`
+- ffmpeg & ffprobe（已內建於 `./ffmpeg/`，亦可在 `settings.yaml` 中指定）
 
 ### 安裝 Python 套件
 
@@ -24,249 +33,154 @@
 pip install -r requirements.txt
 ```
 
-> ⚠️ **注意**：執行程式前請以**系統管理員身份**開啟命令提示字元，
-> DPI 設定需要寫入 Registry 才能提升截圖畫質。
+> ⚠️ **注意**：執行 Phase 1 截圖前請以**系統管理員身份**開啟命令提示字元，DPI 設定需要寫入 Registry 才能提升截圖畫質。
 
 ---
 
 ## 專案結構
 
 ```
-├── phase1_generate.py   # Phase 1 主程式入口
-├── phase2_compose.py    # Phase 2 主程式入口
-├── settings.yaml        # 設定檔（副標題、語音、畫質等）
-├── requirements.txt     # Python 套件需求
-├── README.md            # 本文件
-└── core/                # 核心模組
-    ├── __init__.py
-    ├── parser.py        # PPT 結構解析
-    ├── script.py        # 講稿組合（含 SSML 停頓）
-    ├── tts.py           # TTS 配音（Edge-TTS）
-    ├── video.py         # 影片合成（截圖、clip、ffmpeg）
-    └── utils.py         # 共用工具（文字清理、範圍解析、DPI 設定）
+├── 啟動GUI.bat              # Windows 雙擊直接啟動圖形介面
+├── gui.py                   # 圖形化使用者介面主程式 (GUI)
+├── phase1_generate.py       # Phase 1 主程式：PPT → 講稿 → AI 配音 → 單頁 MP4 clips
+├── phase2_compose.py        # Phase 2 主程式：clips 串接 → MP4 影片原檔與交付物
+├── generate_deliverables.py # 獨立交付物生成工具：秒級產出字幕、講稿、大綱（免重跑 TTS）
+├── settings.yaml            # 設定檔（副標題、語音、畫質、停頓等）
+├── requirements.txt         # Python 套件需求
+├── README.md                # 說明文件
+├── deliverables/            # 交付檔案輸出資料夾（字幕、講稿、大綱）
+├── clips/                   # 單頁 MP4 短片暫存資料夾
+│   ├── intro/
+│   ├── 001/
+│   └── ...
+└── core/                    # 核心模組
+    ├── parser.py            # PPT 結構解析（標題、副標題、文字、表格、備註）
+    ├── script.py            # 講稿組合（副標題規則、開場收尾、程式碼跳過）
+    ├── tts.py               # Edge-TTS 語音生成與靜音串接
+    ├── video.py             # 截圖匯出、GPU/CPU 單頁 MP4 合成、ffmpeg 串接
+    ├── deliverables.py      # 時長統計、字幕 (SRT/VTT)、講稿與分段大綱匯出
+    └── utils.py             # 共用工具（文字清理、範圍解析、DPI 設定）
 ```
 
 ---
 
-## 快速開始
+## 使用方式
 
-### Step 1：設定 settings.yaml
+### 方式一：使用圖形化介面 (GUI，推薦，免打指令)
 
-至少確認以下三項：
+直接雙擊資料夾中的 **`啟動GUI.bat`**，或在終端機執行：
+
+```bash
+python gui.py
+```
+
+在開啟的介面中即可點選按鈕完成所有操作：
+- **`🚀 一鍵完整執行`**：自動完成 Phase 1 截圖配音 + Phase 2 影片合成 + 資通院交付物產出。
+- **`🎬 步驟 1：生成 clips 片段`**：僅執行 Phase 1。
+- **`🎞️ 步驟 2：串接影片與交付物`**：僅執行 Phase 2。
+- **`📑 僅產出資通院交付物`**：秒級產出最新字幕檔 (SRT/VTT)、完整講稿 (TXT/MD) 與分段大綱 (CSV/TXT)。
+- **`📂 開啟交付檔案夾`**：一鍵在檔案總管開啟 `deliverables/` 資料夾。
+
+---
+
+### 方式二：指令列模式 (CLI)
+
+#### Step 1：設定 `settings.yaml`
+
+確認 ffmpeg 路徑與備註欄讀取設定：
 
 ```yaml
-# ffmpeg 路徑
-ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe"
+ffmpeg_path: "./ffmpeg/ffmpeg.exe"
 
-# 前導頁範圍（唸備註欄，其餘頁唸投影片內容）
-notes_slides: [1]
+# 指定哪些頁碼改唸備註欄（如封面/前導頁）
+notes_slides: [1, 2]
 
-# 截圖畫質（DPI）
+# 截圖畫質（DPI，建議 200）
 export_dpi: 200
-```
-
-### Step 2：執行 Phase 1（生成 clips）
-
-```bash
-# 以系統管理員身份開啟命令提示字元，再執行：
-
-# 全部頁面
-python phase1_generate.py --pptx your_file.pptx
-
-# 只處理前導頁（頁碼指定）
-python phase1_generate.py --pptx your_file.pptx --pages 1-3
-
-# 只處理特定標題編號
-python phase1_generate.py --pptx your_file.pptx --range 58,60-65
-
-# 同時指定頁碼與標題編號（會顯示警告並要求確認）
-python phase1_generate.py --pptx your_file.pptx --pages 1-3 --range 58-60
-```
-
-執行完成後，確認 `clips/` 資料夾結構與 `clips/scripts.txt` 講稿內容是否正確。
-
-### Step 3：執行 Phase 2（合成最終影片）
-
-```bash
-# 基本用法
-python phase2_compose.py
-
-# 指定 clips 資料夾與輸出檔名
-python phase2_compose.py --clips clips --output final.mp4
-
-# 合成完後自動刪除 clips 資料夾（節省空間）
-python phase2_compose.py --output final.mp4 --clean
-```
-
----
-
-## 參數說明
-
-### phase1_generate.py
-
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `--pptx` | （必填） | PPT 檔案路徑 |
-| `--settings` | `settings.yaml` | 設定檔路徑 |
-| `--clips` | `clips` | clips 輸出資料夾 |
-| `--pages` | （空，全部） | 指定頁碼，如 `1-3,5,10-15` |
-| `--range` | （空，全部） | 指定標題編號，如 `58,60-65` |
-
-**`--pages` 與 `--range` 同時使用時**，程式會顯示警告並列出各自涵蓋的頁面，
-輸入 `y` 確認後才繼續執行，結果取兩者的聯集。
-
-### phase2_compose.py
-
-| 參數 | 預設值 | 說明 |
-|------|--------|------|
-| `--clips` | `clips` | clips 資料夾路徑 |
-| `--output` | `final_output.mp4` | 輸出影片檔名 |
-| `--settings` | `settings.yaml` | 設定檔路徑 |
-| `--clean` | `false` | 合成完後刪除 clips 資料夾 |
-
----
-
-## clips 資料夾結構
-
-```
-clips/
-├── scripts.txt          # 本次處理頁的講稿預覽
-├── intro/               # 無標題編號的前導頁
-│   ├── page_0001.mp4
-│   └── page_0002.mp4
-├── 001/                 # 標題編號第 1 條的所有頁
-│   ├── page_0004.mp4
-│   └── page_0005.mp4
-└── 058/                 # 標題編號第 58 條的所有頁
-    ├── page_0268.mp4
-    └── page_0270.mp4
-```
-
-最終影片串接順序：`intro/` → `001/` → `002/` → ... 按編號升序。
-
----
-
-## settings.yaml 完整說明
-
-### ffmpeg 路徑
-
-```yaml
-ffmpeg_path: "C:\\ffmpeg\\bin\\ffmpeg.exe"
-```
-
-### 前導頁設定
-
-```yaml
-# 三種寫法任選一種
-notes_slides: [1]          # 只有第 1 頁唸備註欄
-notes_slides: "1-5"        # 第 1 到第 5 頁唸備註欄
-notes_slides: [1, 2, 5]    # 第 1、2、5 頁唸備註欄
-notes_slides:              # 空白 = 全部不唸備註欄
-```
-
-### 五種副標題設定
-
-每個副標題可設定以下四個欄位：
-
-```yaml
-subtitle_config:
-  "說明":
-    opener: "以下說明此原則的內容。"   # 開場白
-    closer: "以上為本原則的說明。"      # 收尾語
-    read_shapes: false                  # 是否唸圖形內文字
-    read_table: true                    # 是否唸表格
-```
-
-| 副標題 | read_shapes | read_table |
-|--------|-------------|------------|
-| 說明 | ✗ | ✓ |
-| 設定方法 | ✗ | ✗ |
-| Azure 入口網站操作示意圖 | ✓ | ✗ |
-| Azure CLI設定方法 | ✗ | ✗ |
-| PowerShell設定方法 | ✗ | ✗ |
-
-### 語音與品質設定
-
-```yaml
-# 段落間停頓時間（毫秒），每個 PPT 段落之間自動插入停頓
-pause_between_paragraphs_ms: 300
 
 # TTS 語音（台灣繁體中文）
 tts_voice: "zh-TW-HsiaoChenNeural"
-tts_batch_size: 20        # 每批次 TTS 請求數，過高可能被限流
-
-# 截圖畫質 DPI（預設 96，建議 150~300）
-export_dpi: 200
-
-# 影片幀率（靜態投影片 12fps 即可）
-video_fps: 12
 ```
 
-### 可用語音清單
+---
 
-| 語音名稱 | 性別 | 風格 |
-|---------|------|------|
-| `zh-TW-HsiaoChenNeural` | 女 | 自然（預設） |
-| `zh-TW-HsiaoYuNeural` | 女 | 活潑 |
-| `zh-TW-YunJheNeural` | 男 | 自然 |
+### Step 2：執行 Phase 1（生成各頁 clips）
+
+```bash
+# 全部頁面生成
+python phase1_generate.py --pptx 教學簡報測試.pptx
+
+# 指定頁碼
+python phase1_generate.py --pptx 教學簡報測試.pptx --pages 1-10
+
+# 指定標題編號
+python phase1_generate.py --pptx 教學簡報測試.pptx --range 1-5
+```
 
 ---
 
-## 核心模組說明
+### Step 3：執行 Phase 2（串接影片並一鍵產出所有交付物）
 
-| 模組 | 功能 |
-|------|------|
-| `core/parser.py` | 解析投影片的標題、副標題、段落、圖形文字、表格、備註，程式碼行（`#` 開頭）自動跳過不唸 |
-| `core/script.py` | 依 settings 規則組合講稿，輸出 SSML 格式（含 `<break>` 停頓標籤） |
-| `core/tts.py` | 呼叫 Edge-TTS 生成音檔，自動重試 3 次並驗證檔案大小 |
-| `core/video.py` | PowerPoint COM 截圖、單頁 MP4 合成、ffmpeg 串接 |
-| `core/utils.py` | 文字清理、`--pages`/`--range` 範圍解析、Registry DPI 寫入 |
+```bash
+# 串接最終 MP4 並同時產出字幕、講稿與分段大綱
+python phase2_compose.py --pptx 教學簡報測試.pptx --output 教學簡報.mp4
+```
 
 ---
 
-## 符號清理規則
+### 獨立工具：一鍵秒級產出交付檔案（不重新合成影片）
 
-講稿組合後會自動清理以下符號：
+若 `clips/` 內已有各頁短片，可隨時直接執行此指令，在幾秒鐘內產出最新字幕與時間點大綱：
 
-| 原始符號 | 處理方式 |
-|---------|---------|
-| `【` `】` | 移除 |
-| `/` | 替換為 `，` |
-| 換行符 `\n` | 替換為 `，` |
-| 連續標點 | 合併為單一 `，` |
-| 多餘空白 | 壓縮為單一空格 |
-| `#` 開頭的行 | 跳過不唸（程式碼行）|
+```bash
+python generate_deliverables.py --pptx 教學簡報測試.pptx --output-dir deliverables
+```
 
 ---
 
-## 斷點續跑
+## 產出範例預覽
 
-Phase 1 支援斷點續跑：
-- 已合成的 clip（`page_XXXX.mp4`）不會重新生成
-- 重新執行相同指令即可從中斷處繼續
-- 若需強制重新生成某頁，手動刪除對應的 `page_XXXX.mp4` 再執行
+### 1. 分段大綱時間點清單 (`_分段大綱時間點.txt`)
 
----
+```text
+【教學簡報與影片 — 分段大綱與時間點清單】
+======================================================================
+影片總時長：08:28:32 (8時28分32秒)
+總章節數  ：共 182 個主要單元 / 820 頁投影片
+======================================================================
 
-## 常見問題
+一、主要章節大綱時間索引 (幾分幾秒)
+----------------------------------------------------------------------
+  [00:00:00] (00分00秒) 前言/簡報說明 （第 1 頁，時長 00分12秒）
+      • [00:00:00] (00分00秒) 第 001 頁：Azure 教學簡報
 
-**Q：執行時出現 PowerPoint 視窗**
-A：截圖過程中 PowerPoint 會短暫開啟，屬正常現象，請勿手動關閉。
+  [00:00:12] (00分12秒) 目錄 （第 2 頁，時長 01分58秒）
+      • [00:00:12] (00分12秒) 第 002 頁：內容說明
 
-**Q：DPI 設定沒有效果**
-A：需以系統管理員身份執行命令提示字元，Registry 才有寫入權限。
+  [00:02:10] (02分10秒) 1.【安全性預設值】類別/【安全性預設值】原則 （第 3~6 頁，時長 02分32秒）
+      • [00:02:10] (02分10秒) 第 003 頁：說明
+      • [00:03:42] (03分42秒) 第 004 頁：設定方法
+      • [00:04:11] (04分11秒) 第 005 頁：Azure 入口網站操作示意圖
+      • [00:04:29] (04分29秒) 第 006 頁：PowerShell設定方法
+```
 
-**Q：TTS 生成失敗或音質異常**
-A：Edge-TTS 為爬取微軟 Edge 瀏覽器的語音服務，偶發網路問題屬正常現象。
-程式支援斷點續跑，重新執行即可補生成失敗的頁面。
+### 2. 字幕檔 (`.srt`)
 
-**Q：某頁投影片沒有聲音**
-A：該頁備註欄與投影片文字皆為空，程式會插入約 1 秒靜音。
-建議補充備註欄內容，或在 `settings.yaml` 的 `notes_slides` 中指定該頁手動撰寫備註。
+```srt
+1
+00:00:00,000 --> 00:00:11,640
+本教學簡報旨在系統性解析 Azure 雲端基礎架構的安全與治理規範，並針對各項核心服務提供具體的實務操作說明。
 
-**Q：Phase 2 提示缺漏 clip**
-A：執行 `phase1_generate.py --pages <缺漏頁碼>` 補生成後再執行 Phase 2。
+2
+00:00:11,640 --> 00:02:09,840
+本簡報系統性地梳理並展示雲端基礎架構中的七大核心防護與管理領域...
+```
 
-**Q：第1條的說明、設定方法頁沒有聲音**
-A：確認 `settings.yaml` 的 `notes_slides` 設定，確保這些頁不在前導頁範圍內。
-例如若只有封面是前導頁，應設定為 `notes_slides: [1]`。
+### 3. 分段大綱審查表格 (`_分段大綱時間點.csv`)
+
+| 項次 | 投影片頁碼 | 大綱項目(大標題) | 分段內容(副標題) | 開始時間(HH:MM:SS) | 開始時間(幾分幾秒) | 結束時間(HH:MM:SS) | 時長(秒) | 時長(分秒) |
+|:---:|:---:|:---|:---|:---:|:---:|:---:|:---:|:---:|
+| 1 | 1 | | Azure 教學簡報 | 00:00:00 | 00分00秒 | 00:00:12 | 11.64 | 00分12秒 |
+| 2 | 2 | 目錄 | | 00:00:12 | 00分12秒 | 00:02:10 | 118.20 | 01分58秒 |
+| 3 | 3 | 1.【安全性預設值】類別/【安全性預設值】原則 | 說明 | 00:02:10 | 02分10秒 | 00:03:42 | 91.76 | 01分32秒 |
+| 4 | 4 | 1.【安全性預設值】類別/【安全性預設值】原則 | 設定方法 | 00:03:42 | 03分42秒 | 00:04:11 | 29.36 | 00分29秒 |
